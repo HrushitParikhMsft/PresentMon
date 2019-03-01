@@ -129,6 +129,7 @@ struct PresentEvent {
     bool SeenWin32KEvents;
     bool WasBatched;
     bool DwmNotified;
+    bool EarlyComposition;
 
     Runtime Runtime;
 
@@ -149,6 +150,7 @@ struct PresentEvent {
     uint64_t Hwnd;
     uint64_t TokenPtr;
     std::deque<std::shared_ptr<PresentEvent>> DependentPresents;
+    std::deque<std::shared_ptr<PresentEvent>> EarlyCompositionDependentPresents;
     bool Completed;
 
     PresentEvent(EVENT_HEADER const& hdr, ::Runtime runtime);
@@ -245,6 +247,11 @@ struct PMTraceConsumer
 
     // Yet another unique way of tracking present history tokens, this time from DxgKrnl -> DWM, only for legacy blit
     std::map<uint64_t, std::shared_ptr<PresentEvent>> mPresentsByLegacyBlitToken;
+
+    // In variable refresh rate scenarios DWM can wake up early and compose the frame with "Immediate" flags so that the frame will 
+    // be flipped to immediately. Tokens which belong to this frame should have ScreenTime set accordingly and not when DWM retires the 
+    // tokens which could be at a later time.
+    std::deque<std::shared_ptr<PresentEvent>> mEarlyCompositionTokens;
 
     // Process events
     std::mutex mNTProcessEventMutex;

@@ -265,6 +265,14 @@ void PMTraceConsumer::HandleDxgkSyncDPC(DxgkSyncDPCEventArgs& args)
     uint64_t EventTime = *(uint64_t*)&args.pEventHeader->TimeStamp;
     eventIter->second->ScreenTime = EventTime;
     eventIter->second->FinalState = PresentResult::Presented;
+
+    // Parse any inframe EarlyComposition tokens dependent on this DWM present 
+    // and mark their screen time here.
+    for (auto& p : eventIter->second->EarlyCompositionDependentPresents) {
+        p->ScreenTime = EventTime;
+    }
+    eventIter->second->EarlyCompositionDependentPresents.clear();
+
     if (eventIter->second->PresentMode == PresentMode::Hardware_Legacy_Flip) {
         CompletePresent(eventIter->second);
     }
@@ -454,6 +462,10 @@ void HandleDXGKEvent(EVENT_RECORD* pEventRecord, PMTraceConsumer* pmConsumer)
             eventIter->second->PresentMode = PresentMode::Hardware_Composed_Independent_Flip;
         }
 
+        // Copy EarlyComposition tokens of this frame to DWMs presentevent. Token screen time will be marked 
+        // below itself if the DWM flip completed immediately or when we get HSyncDPC event
+        std::swap(eventIter->second->EarlyCompositionDependentPresents, pmConsumer->mEarlyCompositionTokens);
+
         if (hdr.EventDescriptor.Version >= 2)
         {
             enum class DxgKrnl_MMIOFlipMPO_FlipEntryStatus {
@@ -470,6 +482,13 @@ void HandleDXGKEvent(EVENT_RECORD* pEventRecord, PMTraceConsumer* pmConsumer)
                 eventIter->second->SupportsTearing = true;
                 if (FlipEntryStatusAfterFlip == DxgKrnl_MMIOFlipMPO_FlipEntryStatus::FlipWaitComplete) {
                     eventIter->second->ScreenTime = EventTime;
+
+                    // Parse all inframe tokens from dependent list and mark their screen time here.
+                    for (auto& p : eventIter->second->EarlyCompositionDependentPresents) {
+                        p->ScreenTime = EventTime;
+                    }
+                    eventIter->second->EarlyCompositionDependentPresents.clear();
+                
                 }
                 if (eventIter->second->PresentMode == PresentMode::Hardware_Legacy_Flip) {
                     pmConsumer->CompletePresent(eventIter->second);
@@ -749,6 +768,17 @@ void HandleWin32kEvent(EVENT_RECORD* pEventRecord, PMTraceConsumer* pmConsumer)
                 event.PresentMode = PresentMode::Hardware_Independent_Flip;
             }
 
+            if (hdr.EventDescriptor.Version >= 1) {
+
+                // This bit indicates that DWM is composing in variable refresh early mode which means this  
+                // token will be on screen before DWM retires them. Add the token to the list.
+                bool EarlyComposition = pmConsumer->mMetadata.GetEventData<BOOL>(pEventRecord, L"EarlyComposition") != 0;
+                if (EarlyComposition) {
+                    event.EarlyComposition = true;
+                    pmConsumer->mEarlyCompositionTokens.emplace_back(eventIter->second);
+                }
+            }
+
             break;
         }
         case TokenState::Confirmed:
@@ -773,7 +803,9 @@ void HandleWin32kEvent(EVENT_RECORD* pEventRecord, PMTraceConsumer* pmConsumer)
         case TokenState::Retired:
         {
             // Retired = present has been completed, token's buffer is now displayed
-            event.ScreenTime = EventTime;
+            if (event.EarlyComposition == false) {
+                event.ScreenTime = EventTime;
+            }
             break;
         }
         case TokenState::Discarded:
